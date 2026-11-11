@@ -11,30 +11,6 @@ using System.Threading;
 using System.Windows.Forms;
 
 namespace ShelfDock {
- // Record the actual button-down position, even between edge polling ticks.
- // A click/hold is not a drag until it leaves Windows' drag tolerance rectangle.
- sealed class MouseDragTracker : IDisposable {
-  delegate IntPtr MouseHook(int code, IntPtr message, IntPtr data);
-  [StructLayout(LayoutKind.Sequential)] struct MouseData { public Point Position; public uint MouseDataValue, Flags, Time; public UIntPtr ExtraInfo; }
-  [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SetWindowsHookEx(int id, MouseHook callback, IntPtr module, uint thread);
-  [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
-  [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
-  [DllImport("kernel32.dll", CharSet=CharSet.Auto)] static extern IntPtr GetModuleHandle(string name);
-  readonly MouseHook callback; IntPtr hook; bool pressed; Point origin;
-  internal bool IsDragging { get; private set; }
-  internal MouseDragTracker(bool monitor) { if (monitor) { callback = OnMouse; hook = SetWindowsHookEx(14,callback,GetModuleHandle(null),0); if (hook == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(),"无法监听鼠标拖动"); } }
-  internal void Record(bool leftHeld, Point pointer) {
-   if (!leftHeld) { pressed = false; IsDragging = false; return; }
-   if (!pressed) { pressed = true; origin = pointer; IsDragging = false; return; }
-   var size = SystemInformation.DragSize;
-   if (!new Rectangle(origin.X-size.Width/2,origin.Y-size.Height/2,size.Width,size.Height).Contains(pointer)) IsDragging = true;
-  }
-  IntPtr OnMouse(int code, IntPtr message, IntPtr data) {
-   if (code >= 0) { int kind = message.ToInt32(); if (kind == 0x0201 || kind == 0x0202 || (kind == 0x0200 && pressed)) { var mouse = (MouseData)Marshal.PtrToStructure(data,typeof(MouseData)); Record(kind != 0x0202,mouse.Position); } }
-   return CallNextHookEx(hook,code,message,data);
-  }
-  public void Dispose() { if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } }
- }
  [DataContract] public class Entry {
   [DataMember] public string Kind;
   [DataMember] public string Value;
@@ -65,7 +41,7 @@ namespace ShelfDock {
    bool created; using (var mutex = new Mutex(true, "Local\\ShelfDock.Singleton", out created)) {
     if (!created) {
      bool sameVersion = false;
-     try { using (var marker = EventWaitHandle.OpenExisting("Local\\ShelfDock.Version.1.2")) sameVersion = true; } catch (WaitHandleCannotBeOpenedException) {}
+     try { using (var marker = EventWaitHandle.OpenExisting("Local\\ShelfDock.Version.1.21")) sameVersion = true; } catch (WaitHandleCannotBeOpenedException) {}
      if (sameVersion) { if (!silent) { try { using (var show = EventWaitHandle.OpenExisting("Local\\ShelfDock.Show")) show.Set(); } catch { MessageBox.Show("拾放已经在运行，请查看系统托盘。", "拾放"); } } return; }
      try { using (var exit = EventWaitHandle.OpenExisting("Local\\ShelfDock.Exit")) exit.Set(); if (!mutex.WaitOne(5000)) { MessageBox.Show("旧版拾放仍在运行，请从系统托盘退出后重新打开。", "拾放"); return; } }
      catch (WaitHandleCannotBeOpenedException) { MessageBox.Show("拾放正在启动或旧版未正常响应，请稍后重试。", "拾放"); return; }
@@ -73,7 +49,7 @@ namespace ShelfDock {
      catch (AbandonedMutexException) {}
     }
     Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-    using (var version = new EventWaitHandle(false, EventResetMode.ManualReset,"Local\\ShelfDock.Version.1.2")) using (ShowEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Show")) using (ExitEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Exit")) {
+    using (var version = new EventWaitHandle(false, EventResetMode.ManualReset,"Local\\ShelfDock.Version.1.21")) using (ShowEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Show")) using (ExitEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Exit")) {
      string dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ShelfDock");
      for (int i=0; i+1<args.Length; i++) if (args[i] == "--data-dir") dataRoot = Path.GetFullPath(args[++i]);
      Application.Run(new Shelf(dataRoot, silent));
@@ -96,14 +72,14 @@ namespace ShelfDock {
   bool edgePreview, emptyShelfClosePending; readonly bool startHidden; bool initialVisibilityHandled; double animationFrom, animationTo; readonly System.Diagnostics.Stopwatch emptyCloseClock = new System.Diagnostics.Stopwatch();
   internal Func<Point> PointerPosition = () => Cursor.Position;
   bool edgeDragEnteredWindow, edgeDragDismissed, edgeReactivationBlocked; int edgeDragClosestDistance;
-  readonly MouseDragTracker mouseDrag = new MouseDragTracker(true);
+  readonly List<EdgeDropZone> edgeDropZones = new List<EdgeDropZone>();
   Color bg = Color.FromArgb(246,248,249), ink = Color.FromArgb(32,43,48), muted = Color.FromArgb(107,120,126), accent = Color.FromArgb(0,122,111);
   public Shelf() : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ShelfDock")) {}
   public Shelf(string dataRoot) : this(dataRoot, false) {}
   public Shelf(string dataRoot, bool silentStart) {
    root = dataRoot; startHidden = silentStart; ShowInTaskbar = !silentStart;
    Directory.CreateDirectory(root); LoadItems(); LoadPreferences(); preferences.StartWithWindows = StartupRegistration.IsEnabled();
-   Text = "拾放 ShelfDock 1.2"; Size = new Size(370, 590); MinimumSize = new Size(320, 350); StartPosition = FormStartPosition.Manual;
+   Text = "拾放 ShelfDock 1.21"; Size = new Size(370, 590); MinimumSize = new Size(320, 350); StartPosition = FormStartPosition.Manual;
    var area = Screen.PrimaryScreen.WorkingArea; Location = new Point(preferences.EdgeSide == "left" ? area.Left + 16 : area.Right - Width - 16, area.Top + Math.Max(10, (area.Height - Height)/2));
    Font = new Font("Microsoft YaHei UI", 9F); BackColor = bg; ForeColor = ink; TopMost = true; AllowDrop = true; KeyPreview = true;
    KeyDown += (s,e) => { if (e.Control && e.KeyCode == Keys.V) { Paste(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.A) { foreach (var en in entries) selected.Add(en); PaintSelection(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.C && selected.Count > 0) { try { Clipboard.SetDataObject(MakeSelectionData(selected.ToArray()),true); } catch (Exception ex) { MessageBox.Show(ex.Message,"拾放"); } e.Handled = true; } if (e.KeyCode == Keys.Delete) { RemoveEntries(selected.ToArray()); e.Handled = true; } if (e.KeyCode == Keys.Escape) Hide(); };
@@ -128,7 +104,7 @@ namespace ShelfDock {
    Resize += (s,e) => RefreshItems();
    try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch {} tray.Text = "拾放 ShelfDock"; tray.Icon = Icon; tray.Visible = true;
    var menu = new ContextMenuStrip(); menu.Items.Add("显示拾放   Ctrl+Alt+Space", null, (s,e) => ShowShelf()); menu.Items.Add("设置", null, (s,e) => { ShowShelf(); ShowSettings(); }); menu.Items.Add("使用帮助", null, (s,e) => MessageBox.Show("拖入内容暂存，再拖出到目标应用。\n文件只记录原位置，拖出采用复制，不移动原文件。\nCtrl+单击多选；Ctrl+A 全选；Ctrl+C 复制；Delete 移除。\n双击项目复制到剪贴板。关闭窗口行为可在设置中切换。\n同一次加入的多个文件会组成合集，可整体复制或拖出。成功拖出后仅移除对应暂存项目。\n在设置中可开关边缘唤出并选择屏幕左侧或右侧。\n文字与图片存储在本机，程序不联网。\n\n独立开发的 Windows 暂存工具，与 Yoink 无关联。", "拾放 · 使用帮助")); menu.Items.Add("退出", null, (s,e) => { quitting = true; Close(); }); tray.ContextMenuStrip = menu; tray.DoubleClick += (s,e) => ShowShelf();
-   edge.Interval = 50; edge.Tick += (s,e) => { if (Program.ExitEvent != null && Program.ExitEvent.WaitOne(0)) { quitting = true; Close(); return; } if (Program.ShowEvent != null && Program.ShowEvent.WaitOne(0)) ShowShelf(); UpdateEdgeVisibility((Control.MouseButtons & MouseButtons.Left) != 0, Cursor.Position); }; edge.Start();
+   edge.Interval = 50; edge.Tick += (s,e) => { if (Program.ExitEvent != null && Program.ExitEvent.WaitOne(0)) { quitting = true; Close(); return; } if (Program.ShowEvent != null && Program.ShowEvent.WaitOne(0)) ShowShelf(); bool held = (Control.MouseButtons & MouseButtons.Left) != 0; UpdateEdgeVisibility(held, Cursor.Position); SyncEdgeDropZones(held); }; edge.Start();
    emptyCloseTimer.Interval = 50; emptyCloseTimer.Tick += (s,e) => CheckEmptyShelfClose();
    animation.Interval = 15; animation.Tick += (s,e) => AdvanceAnimation();
    HandleCreated += (s,e) => { if (!RegisterHotKey(Handle, 1, 2 | 4, (uint)Keys.Space) && !startHidden) tray.ShowBalloonTip(3000, "拾放", "快捷键 Ctrl+Alt+Space 已被其他程序占用。", ToolTipIcon.Info); };
@@ -139,7 +115,24 @@ namespace ShelfDock {
   protected override void WndProc(ref Message m) { if (m.Msg == 0x0312 && m.WParam.ToInt32() == 1) { if (Visible) Hide(); else ShowShelf(); } base.WndProc(ref m); }
   internal static bool AtEdge(Point p, Rectangle screen, string side, int percent) { int width = Math.Max(1, (int)Math.Ceiling(screen.Width * percent / 100.0)); return screen.Contains(p) && (side == "left" ? p.X < screen.Left+width : p.X >= screen.Right-width); }
   internal void UpdateEdgeVisibility(bool leftHeld, Point pointer) {
-   UpdateEdgeVisibility(leftHeld,pointer,mouseDrag.IsDragging);
+   // Mouse movement alone is never evidence of an OLE content drag.
+   UpdateEdgeVisibility(leftHeld,pointer,false);
+  }
+  internal bool HandleEdgeDrag(IDataObject data, DragDropEffects allowed, Point pointer) {
+   if (ownDrag || !CanAccept(data) || (allowed & DragDropEffects.Copy) == 0) return false;
+   UpdateEdgeVisibility(true,pointer,true);
+   return Visible;
+  }
+  void SyncEdgeDropZones(bool candidate) {
+   if (!candidate || ownDrag || !preferences.EdgeEnabled || (Visible && Opacity >= 0.1)) { foreach (var zone in edgeDropZones) zone.Hide(); return; }
+   var screens = Screen.AllScreens;
+   while (edgeDropZones.Count < screens.Length) edgeDropZones.Add(new EdgeDropZone(this));
+   for (int i = 0; i < edgeDropZones.Count; i++) {
+    var zone = edgeDropZones[i]; if (i >= screens.Length) { zone.Hide(); continue; }
+    var area = screens[i].Bounds; int width = Math.Max(1,(int)Math.Ceiling(area.Width*preferences.EdgePercent/100.0));
+    zone.Bounds = new Rectangle(preferences.EdgeSide == "left" ? area.Left : area.Right-width,area.Top,width,area.Height);
+    if (!zone.Visible) zone.Show();
+   }
   }
   internal void UpdateEdgeVisibility(bool leftHeld, Point pointer, bool dragDetected) {
    if (!leftHeld || !AtEdge(pointer,Screen.FromPoint(pointer).Bounds,preferences.EdgeSide,preferences.EdgePercent)) edgeReactivationBlocked = false;
@@ -249,7 +242,7 @@ namespace ShelfDock {
   void CopyEntry(Entry e) { try { Clipboard.SetDataObject(MakeSelectionData(new[]{e}), true); } catch (Exception ex) { MessageBox.Show("复制失败：" + ex.Message, "拾放"); } }
   void LoadItems() { var path = Path.Combine(root,"items.json"); if (!File.Exists(path)) return; try { using (var fs = File.OpenRead(path)) { var serializer = new DataContractJsonSerializer(typeof(List<Entry>)); var saved = (List<Entry>)serializer.ReadObject(fs); if (saved != null) entries.AddRange(saved.Where(x => x != null && x.Value != null && x.Name != null && (x.Kind == "text" || x.Kind == "file" || x.Kind == "image" || (x.Kind == "group" && x.Paths != null && x.Paths.Length > 0 && x.Paths.All(p => !String.IsNullOrEmpty(p)))))); } } catch { var backup = path + ".unreadable-" + DateTime.Now.ToString("yyyyMMddHHmmss"); File.Copy(path, backup, true); MessageBox.Show("暂存列表无法读取，已备份到 " + backup, "拾放"); } }
   internal Entry[] Items { get { return entries.ToArray(); } }
-  protected override void Dispose(bool disposing) { if (disposing) { mouseDrag.Dispose(); edge.Stop(); edge.Dispose(); animation.Stop(); animation.Dispose(); emptyCloseTimer.Stop(); emptyCloseTimer.Dispose(); tray.Visible = false; tray.Dispose(); tips.Dispose(); } base.Dispose(disposing); }
+  protected override void Dispose(bool disposing) { if (disposing) { edge.Stop(); edge.Dispose(); foreach (var zone in edgeDropZones) zone.Dispose(); edgeDropZones.Clear(); animation.Stop(); animation.Dispose(); emptyCloseTimer.Stop(); emptyCloseTimer.Dispose(); tray.Visible = false; tray.Dispose(); tips.Dispose(); } base.Dispose(disposing); }
   void Save() { try { var path = Path.Combine(root,"items.json"); var temp = path + ".tmp"; using (var fs = File.Create(temp)) new DataContractJsonSerializer(typeof(List<Entry>)).WriteObject(fs, entries); if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp,path); } catch (Exception ex) { MessageBox.Show("无法保存暂存列表：" + ex.Message, "拾放"); } }
  }
 }
