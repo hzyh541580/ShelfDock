@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Drawing;
@@ -59,14 +59,14 @@ namespace ShelfDock {
    bool created; using (var mutex = new Mutex(true, "Local\\ShelfDock.Singleton", out created)) {
     if (!created) {
      bool sameVersion = false;
-     try { using (var marker = EventWaitHandle.OpenExisting("Local\\ShelfDock.Version.1.17")) sameVersion = true; } catch (WaitHandleCannotBeOpenedException) {}
+     try { using (var marker = EventWaitHandle.OpenExisting("Local\\ShelfDock.Version.1.18")) sameVersion = true; } catch (WaitHandleCannotBeOpenedException) {}
      if (sameVersion) { if (!silent) { try { using (var show = EventWaitHandle.OpenExisting("Local\\ShelfDock.Show")) show.Set(); } catch { MessageBox.Show("拾放已经在运行，请查看系统托盘。", "拾放"); } } return; }
      try { using (var exit = EventWaitHandle.OpenExisting("Local\\ShelfDock.Exit")) exit.Set(); if (!mutex.WaitOne(5000)) { MessageBox.Show("旧版拾放仍在运行，请从系统托盘退出后重新打开。", "拾放"); return; } }
      catch (WaitHandleCannotBeOpenedException) { MessageBox.Show("拾放正在启动或旧版未正常响应，请稍后重试。", "拾放"); return; }
      catch (AbandonedMutexException) {}
     }
     Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-    using (var version = new EventWaitHandle(false, EventResetMode.ManualReset,"Local\\ShelfDock.Version.1.17")) using (ShowEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Show")) using (ExitEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Exit")) {
+    using (var version = new EventWaitHandle(false, EventResetMode.ManualReset,"Local\\ShelfDock.Version.1.18")) using (ShowEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Show")) using (ExitEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Exit")) {
      string dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ShelfDock");
      for (int i=0; i+1<args.Length; i++) if (args[i] == "--data-dir") dataRoot = Path.GetFullPath(args[++i]);
      Application.Run(new Shelf(dataRoot, silent));
@@ -96,7 +96,7 @@ namespace ShelfDock {
   public Shelf(string dataRoot, bool silentStart) {
    root = dataRoot; startHidden = silentStart; ShowInTaskbar = !silentStart;
    Directory.CreateDirectory(root); LoadItems(); LoadPreferences(); preferences.StartWithWindows = StartupRegistration.IsEnabled();
-   Text = "拾放 ShelfDock 1.17"; Size = new Size(370, 590); MinimumSize = new Size(320, 350); StartPosition = FormStartPosition.Manual;
+   Text = "拾放 ShelfDock 1.18"; Size = new Size(370, 590); MinimumSize = new Size(320, 350); StartPosition = FormStartPosition.Manual;
    var area = Screen.PrimaryScreen.WorkingArea; Location = new Point(preferences.EdgeSide == "left" ? area.Left + 16 : area.Right - Width - 16, area.Top + Math.Max(10, (area.Height - Height)/2));
    Font = new Font("Microsoft YaHei UI", 9F); BackColor = bg; ForeColor = ink; TopMost = true; AllowDrop = true; KeyPreview = true;
    KeyDown += (s,e) => { if (e.Control && e.KeyCode == Keys.V) { Paste(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.A) { foreach (var en in entries) selected.Add(en); PaintSelection(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.C && selected.Count > 0) { try { Clipboard.SetDataObject(MakeSelectionData(selected.ToArray()),true); } catch (Exception ex) { MessageBox.Show(ex.Message,"拾放"); } e.Handled = true; } if (e.KeyCode == Keys.Delete) { RemoveEntries(selected.ToArray()); e.Handled = true; } if (e.KeyCode == Keys.Escape) Hide(); };
