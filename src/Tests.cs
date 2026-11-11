@@ -52,19 +52,21 @@ namespace ShelfDock {
     using (var restored = new Shelf(Path.Combine(dir,"store"))) { Assert(restored.Items.Length == 5,"All entries restored from atomic JSON store"); Assert(restored.Items[0].Paths.SequenceEqual(new[]{file,folder}),"Group members restored"); Assert(!restored.Settings.EdgeEnabled && restored.Settings.EdgeSide == "left" && restored.Settings.EdgePercent == 25,"Settings including percentage restored"); Assert(restored.Left == Screen.PrimaryScreen.WorkingArea.Left + 16,"Saved left preference positions startup window on the left"); Assert(restored.Items[2].Value == "第一行\nsecond line 🌿","Unicode persisted exactly"); Assert(restored.Items.Last().Value == imagePath,"Image reference restored"); }
     using (var app = new Shelf(Path.Combine(dir,"startup-right"))) { Assert(app.Left == Screen.PrimaryScreen.WorkingArea.Right - app.Width - 16,"Default right preference positions startup window on the right"); app.Settings.EdgeSide = "right"; app.SavePreferences(); }
     using (var app = new Shelf(Path.Combine(dir,"startup-right"))) Assert(app.Left == Screen.PrimaryScreen.WorkingArea.Right - app.Width - 16,"Saved right preference positions startup window on the right");
-    foreach (string side in new[]{"left","right"}) using (var app = new Shelf(Path.Combine(dir,"click-edge-"+side))) using (var gesture = new MouseDragTracker(false)) {
+    foreach (string side in new[]{"left","right"}) using (var app = new Shelf(Path.Combine(dir,"click-edge-"+side))) {
      app.StopEdgePollingForTests(); app.Settings.EdgeSide = side;
      var screen = Screen.PrimaryScreen.Bounds; var point = new Point(side == "left" ? screen.Left : screen.Right-1,screen.Top+screen.Height/2);
-     var tolerance = SystemInformation.DragSize;
-     gesture.Record(true,point); app.UpdateEdgeVisibility(true,point,gesture.IsDragging); app.CompleteAnimationForTests(); Assert(!app.Visible,"Clicking edge must not show window: "+side);
-     for (int n = 0; n < 30; n++) { gesture.Record(true,point); app.UpdateEdgeVisibility(true,point,gesture.IsDragging); }
-     app.CompleteAnimationForTests(); Assert(!app.Visible,"Stationary long press at edge must not show window: "+side);
-     var jitter = new Point(point.X,point.Y+Math.Max(0,tolerance.Height/2-1)); gesture.Record(true,jitter); app.UpdateEdgeVisibility(true,jitter,gesture.IsDragging); Assert(!gesture.IsDragging && !app.Visible,"Small click jitter stays within system tolerance: "+side);
-     gesture.Record(false,point); app.UpdateEdgeVisibility(false,point,gesture.IsDragging); Assert(!app.Visible,"Click release does not show window: "+side);
-     gesture.Record(true,point); var moved = new Point(point.X,point.Y+tolerance.Height); gesture.Record(true,moved); app.UpdateEdgeVisibility(true,moved,gesture.IsDragging); app.CompleteAnimationForTests(); Assert(gesture.IsDragging && app.Visible,"Drag started inside edge range activates after movement: "+side);
-     gesture.Record(false,moved); app.UpdateEdgeVisibility(false,moved,gesture.IsDragging); app.Hide(); app.CompleteAnimationForTests();
-     gesture.Record(true,point); app.UpdateEdgeVisibility(true,point,gesture.IsDragging); Assert(!gesture.IsDragging && !app.Visible,"Previous drag cannot make next click activate: "+side);
-     gesture.Record(false,point); var center = new Point(screen.Left+screen.Width/2,point.Y); gesture.Record(true,center); gesture.Record(true,point); app.UpdateEdgeVisibility(true,point,gesture.IsDragging); app.CompleteAnimationForTests(); Assert(app.Visible,"Dragging from outside edge range still activates: "+side);
+     app.UpdateEdgeVisibility(true,point); app.CompleteAnimationForTests(); Assert(!app.Visible,"Click at edge cannot activate: "+side);
+     for (int n=0;n<30;n++) app.UpdateEdgeVisibility(true,point);
+     app.CompleteAnimationForTests(); Assert(!app.Visible,"Long press at edge cannot activate: "+side);
+     app.UpdateEdgeVisibility(true,new Point(point.X,point.Y+40)); app.CompleteAnimationForTests(); Assert(!app.Visible,"Held movement along edge cannot activate: "+side);
+     app.UpdateEdgeVisibility(true,new Point(screen.Left+screen.Width/2,point.Y)); app.UpdateEdgeVisibility(true,point); app.CompleteAnimationForTests(); Assert(!app.Visible,"Held movement into edge cannot activate: "+side);
+     app.UpdateEdgeVisibility(false,point); app.CompleteAnimationForTests(); Assert(!app.Visible,"Button release cannot activate: "+side);
+     var payload = new DataObject(DataFormats.FileDrop,new[]{folder});
+     Assert(app.HandleEdgeDrag(payload,DragDropEffects.Copy,point),"Real file payload activates: "+side); app.CompleteAnimationForTests(); Assert(app.Visible,"Real content reveals shelf: "+side); app.Hide(); app.CompleteAnimationForTests();
+     Assert(!app.HandleEdgeDrag(null,DragDropEffects.Copy,point) && !app.Visible,"Null payload cannot activate: "+side);
+     Assert(!app.HandleEdgeDrag(new DataObject("unsupported",new object()),DragDropEffects.Copy,point) && !app.Visible,"Unsupported payload cannot activate: "+side);
+     Assert(!app.HandleEdgeDrag(payload,DragDropEffects.None,point) && !app.Visible,"Rejected effects cannot activate: "+side);
+     Assert(app.HandleEdgeDrag(new DataObject(DataFormats.UnicodeText,"真实文字拖放"),DragDropEffects.Copy,point),"Real text activates: "+side); app.Hide(); app.CompleteAnimationForTests();
     }
     using (var app = new Shelf(Path.Combine(dir,"edge-store"))) {
      app.StopEdgePollingForTests();
