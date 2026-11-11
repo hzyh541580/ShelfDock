@@ -13,6 +13,13 @@ namespace ShelfDock {
     Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
     string file = Path.Combine(dir,"中文 file.txt"); File.WriteAllText(file,"original content"); string folder = Path.Combine(dir,"folder"); Directory.CreateDirectory(folder);
     string imagePath;
+    Assert(!StandardUserLauncher.IsElevated,"Regression tests run at the same standard-user level as Explorer");
+    Assert(StandardUserLauncher.QuoteArgument("C:\\folder with space\\") == "\"C:\\folder with space\\\\\"","Launcher quotes trailing path separators");
+    Assert(StandardUserLauncher.QuoteArgument("a\"b") == "\"a\\\"b\"","Launcher escapes embedded quotes");
+    string probe=Path.Combine(dir,"launch result.txt");
+    int launched=StandardUserLauncher.Start(Application.ExecutablePath,new[]{"--launch-probe",probe,"中文 path with spaces","a\"b","C:\\tail\\"});
+    try { using(var child=System.Diagnostics.Process.GetProcessById(launched)) Assert(child.WaitForExit(10000),"Standard-user launch completes"); } catch(ArgumentException) {}
+    Assert(File.ReadAllText(probe)=="PASS: standard user\r\n中文 path with spaces\r\na\"b\r\nC:\\tail\\","Launched process has standard permissions and receives original Unicode arguments");
     using (var app = new Shelf(Path.Combine(dir,"store"))) {
      app.Show(); Application.DoEvents(); using (var preview = new Bitmap(app.Width,app.Height)) { app.DrawToBitmap(preview,app.ClientRectangle); preview.Save(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(result)),"preview-empty.png")); } app.Hide(); app.CompleteAnimationForTests();
      Assert(app.Items.Length == 0,"New shelf should be empty");

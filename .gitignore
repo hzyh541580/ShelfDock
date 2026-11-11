@@ -4,3 +4,6 @@ src/test-data-*/
 src/test-results.txt
 src/preview-*.png
 .vs/
+
+src/full-uninstall-verification/
+src/uninstall-handoff-verification/

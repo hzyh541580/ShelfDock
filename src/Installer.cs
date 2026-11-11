@@ -20,7 +20,7 @@ class Setup {
   string uninstallShortcut = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs),"卸载拾放 ShelfDock.lnk");
   if (args.Length == 2 && args[0] == "--test-install") {
    string testRoot = Path.GetFullPath(args[1]); Directory.CreateDirectory(testRoot); string target = Path.Combine(testRoot,"ShelfDock.exe"); string testKey = @"Software\ShelfDock\InstallerTest-" + Guid.NewGuid().ToString("N");
-   try { WritePayload(target); File.Copy(Assembly.GetExecutingAssembly().Location,Path.Combine(testRoot,"Uninstall.exe"),true); CreateShortcut(Path.Combine(testRoot,"ShelfDock.lnk"),target); CreateShortcut(Path.Combine(testRoot,"Uninstall.lnk"),Path.Combine(testRoot,"Uninstall.exe"),"/uninstall"); WriteRegistration(testKey,testRoot,target,Path.Combine(testRoot,"Uninstall.exe")); using (var key = Registry.CurrentUser.OpenSubKey(testKey)) if ((string)key.GetValue("DisplayVersion") != "1.18.0" || (string)key.GetValue("UninstallString") != "\""+Path.Combine(testRoot,"Uninstall.exe")+"\" /uninstall") throw new IOException("Registration test failed"); File.WriteAllText(Path.Combine(testRoot,"installer-test.txt"),"PASS: installer payload extraction, start menu uninstall shortcut, and per-user uninstall registration."); } catch (Exception e) { File.WriteAllText(Path.Combine(testRoot,"installer-test.txt"),"FAIL: " + e); Environment.ExitCode = 1; } finally { Registry.CurrentUser.DeleteSubKey(testKey,false); } return;
+   try { WritePayload(target); File.Copy(Assembly.GetExecutingAssembly().Location,Path.Combine(testRoot,"Uninstall.exe"),true); CreateShortcut(Path.Combine(testRoot,"ShelfDock.lnk"),target); CreateShortcut(Path.Combine(testRoot,"Uninstall.lnk"),Path.Combine(testRoot,"Uninstall.exe"),"/uninstall"); WriteRegistration(testKey,testRoot,target,Path.Combine(testRoot,"Uninstall.exe")); using (var key = Registry.CurrentUser.OpenSubKey(testKey)) if ((string)key.GetValue("DisplayVersion") != "1.19.0" || (string)key.GetValue("UninstallString") != "\""+Path.Combine(testRoot,"Uninstall.exe")+"\" /uninstall") throw new IOException("Registration test failed"); File.WriteAllText(Path.Combine(testRoot,"installer-test.txt"),"PASS: installer payload extraction, start menu uninstall shortcut, and per-user uninstall registration."); } catch (Exception e) { File.WriteAllText(Path.Combine(testRoot,"installer-test.txt"),"FAIL: " + e); Environment.ExitCode = 1; } finally { Registry.CurrentUser.DeleteSubKey(testKey,false); } return;
   }
   if (args.Length == 2 && args[0] == "--test-full-uninstall") { FullRemoval.Test(args[1]); return; }
   if (args.Length == 2 && args[0] == "--test-uninstall-handoff") { FullRemoval.TestHandoff(args[1]); return; }
@@ -42,7 +42,10 @@ class Setup {
    CreateShortcut(shortcut,exe); CreateShortcut(uninstallShortcut,setup,"/uninstall"); if (ShelfDock.StartupRegistration.IsEnabled()) ShelfDock.StartupRegistration.Set(true,exe);
    WriteRegistration(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\ShelfDock",folder,exe,setup,true);
    try { RemoveLegacyInstallation(); } catch {}
-   if (MessageBox.Show("安装完成。现在打开拾放？", "拾放", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes) System.Diagnostics.Process.Start(exe);
+   if (MessageBox.Show("安装完成。现在打开拾放？", "拾放", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes) {
+    try { ShelfDock.StandardUserLauncher.Start(exe,new string[0]); }
+    catch(Exception ex) { MessageBox.Show("安装已完成，但无法以普通权限启动拾放："+ex.Message+"\n请从开始菜单打开拾放。","拾放"); }
+   }
   } catch (Exception e) { MessageBox.Show("安装失败，请先退出运行中的拾放：" + e.Message, "拾放"); }
  }
  internal static string InstallFolder { get { return Path.Combine(Environment.GetEnvironmentVariable("ProgramW6432") ?? Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"ShelfDock"); } }
@@ -66,5 +69,5 @@ class Setup {
   try { shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")); dynamic s = shell; shortcut = s.CreateShortcut(path); dynamic link = shortcut; link.TargetPath = target; link.Arguments = arguments; link.WorkingDirectory = Path.GetDirectoryName(target); link.Description = "拾放 ShelfDock"; link.IconLocation = target + ",0"; link.Save(); }
   finally { if (shortcut != null) System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shortcut); if (shell != null) System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); }
  }
- static void WriteRegistration(string path,string folder,string exe,string setup,bool machine = false) { using (var key = (machine ? Registry.LocalMachine : Registry.CurrentUser).CreateSubKey(path)) { key.SetValue("DisplayName", "拾放 ShelfDock"); key.SetValue("DisplayVersion", "1.18.0"); key.SetValue("Publisher", "ShelfDock"); key.SetValue("InstallLocation", folder); key.SetValue("UninstallString", "\"" + setup + "\" /uninstall"); key.SetValue("DisplayIcon", exe); key.SetValue("NoModify", 1, RegistryValueKind.DWord); key.SetValue("NoRepair", 1, RegistryValueKind.DWord); } }
+ static void WriteRegistration(string path,string folder,string exe,string setup,bool machine = false) { using (var key = (machine ? Registry.LocalMachine : Registry.CurrentUser).CreateSubKey(path)) { key.SetValue("DisplayName", "拾放 ShelfDock"); key.SetValue("DisplayVersion", "1.19.0"); key.SetValue("Publisher", "ShelfDock"); key.SetValue("InstallLocation", folder); key.SetValue("UninstallString", "\"" + setup + "\" /uninstall"); key.SetValue("DisplayIcon", exe); key.SetValue("NoModify", 1, RegistryValueKind.DWord); key.SetValue("NoRepair", 1, RegistryValueKind.DWord); } }
 }
