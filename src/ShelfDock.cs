@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Drawing;
@@ -31,30 +31,22 @@ namespace ShelfDock {
   internal static EventWaitHandle ExitEvent;
   [STAThread] static void Main(string[] args) {
    if (args.Length == 2 && args[0] == "--self-test") { Tests.Run(args[1]); return; }
-   if (args.Length >= 2 && args[0] == "--launch-probe") { File.WriteAllText(args[1],StandardUserLauncher.IsElevated ? "FAIL: elevated" : "PASS: standard user\r\n"+String.Join("\r\n",args.Skip(2))); return; }
-   if (StandardUserLauncher.IsElevated) {
-    try { StandardUserLauncher.Start(Application.ExecutablePath,args); }
-    catch(Exception ex) { MessageBox.Show("无法以普通权限启动拾放："+ex.Message+"\n请退出后从开始菜单正常打开，勿选择“以管理员身份运行”。","拾放"); }
-    return;
-   }
+   if (args.Length == 7 && args[0] == "--instance-probe") { Tests.InstanceProbe(args); return; }
+   if (args.Length >= 3 && args[0] == "--launch-probe") { bool expectedElevated=args[2] == "elevated"; string result=StandardUserLauncher.IsElevated == expectedElevated ? "PASS: matching desktop permission level\r\n" : "FAIL: permission level mismatch\r\n"; File.WriteAllText(args[1],result+String.Join("\r\n",args.Skip(3))); return; }
+   try {
+    if (StandardUserLauncher.IsElevated != StandardUserLauncher.IsShellElevated) { StandardUserLauncher.Start(Application.ExecutablePath,args); return; }
+   } catch(Exception ex) { MessageBox.Show("无法按桌面资源管理器的权限级别启动拾放："+ex.Message,"拾放"); return; }
    bool silent = args.Any(a => a == "--silent");
-   bool created; using (var mutex = new Mutex(true, "Local\\ShelfDock.Singleton", out created)) {
-    if (!created) {
-     bool sameVersion = false;
-     try { using (var marker = EventWaitHandle.OpenExisting("Local\\ShelfDock.Version.1.21")) sameVersion = true; } catch (WaitHandleCannotBeOpenedException) {}
-     if (sameVersion) { if (!silent) { try { using (var show = EventWaitHandle.OpenExisting("Local\\ShelfDock.Show")) show.Set(); } catch { MessageBox.Show("拾放已经在运行，请查看系统托盘。", "拾放"); } } return; }
-     try { using (var exit = EventWaitHandle.OpenExisting("Local\\ShelfDock.Exit")) exit.Set(); if (!mutex.WaitOne(5000)) { MessageBox.Show("旧版拾放仍在运行，请从系统托盘退出后重新打开。", "拾放"); return; } }
-     catch (WaitHandleCannotBeOpenedException) { MessageBox.Show("拾放正在启动或旧版未正常响应，请稍后重试。", "拾放"); return; }
-     catch (UnauthorizedAccessException) { MessageBox.Show("旧版拾放仍在以管理员权限运行，请先从旧版托盘菜单退出，再打开此版本。", "拾放"); return; }
-     catch (AbandonedMutexException) {}
-    }
+   try { using (var instance = new InstanceCoordinator(InstanceCoordinator.ProductName,typeof(Program).Assembly.GetName().Version)) {
+    if(!instance.Enter(silent)) return;
     Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-    using (var version = new EventWaitHandle(false, EventResetMode.ManualReset,"Local\\ShelfDock.Version.1.21")) using (ShowEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Show")) using (ExitEvent = new EventWaitHandle(false, EventResetMode.AutoReset,"Local\\ShelfDock.Exit")) {
+    ShowEvent=instance.ShowEvent; ExitEvent=instance.ExitEvent;
+    try {
      string dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ShelfDock");
      for (int i=0; i+1<args.Length; i++) if (args[i] == "--data-dir") dataRoot = Path.GetFullPath(args[++i]);
-     Application.Run(new Shelf(dataRoot, silent));
-    }
-   }
+     using(var context=new ShelfContext(new Shelf(dataRoot,silent),instance,silent)) Application.Run(context);
+    } finally { ShowEvent=null; ExitEvent=null; }
+   } } catch(Exception ex) { MessageBox.Show("无法启动拾放："+ex.Message,"拾放"); }
   }
  }
  public class Shelf : Form {
@@ -65,7 +57,9 @@ namespace ShelfDock {
   readonly List<Entry> entries = new List<Entry>();
   readonly FlowLayoutPanel list = new FlowLayoutPanel();
   readonly Label count = new Label(); readonly Label empty = new Label();
-  readonly NotifyIcon tray = new NotifyIcon(); readonly System.Windows.Forms.Timer edge = new System.Windows.Forms.Timer(); readonly System.Windows.Forms.Timer animation = new System.Windows.Forms.Timer(); readonly System.Windows.Forms.Timer emptyCloseTimer = new System.Windows.Forms.Timer();
+  readonly StableTrayIcon tray = new StableTrayIcon(); readonly System.Windows.Forms.Timer edge = new System.Windows.Forms.Timer(); readonly System.Windows.Forms.Timer animation = new System.Windows.Forms.Timer(); readonly System.Windows.Forms.Timer emptyCloseTimer = new System.Windows.Forms.Timer();
+  bool trayMenuOpen, trayActionPending, blockEdgeUntilRelease; int dialogDepth;
+  IntPtr hotkeyWindow;
   readonly ToolTip tips = new ToolTip();
   readonly HashSet<Entry> selected = new HashSet<Entry>();
   bool quitting, dragging; Point dragStart; bool ownDrag;
@@ -76,10 +70,11 @@ namespace ShelfDock {
   Color bg = Color.FromArgb(246,248,249), ink = Color.FromArgb(32,43,48), muted = Color.FromArgb(107,120,126), accent = Color.FromArgb(0,122,111);
   public Shelf() : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ShelfDock")) {}
   public Shelf(string dataRoot) : this(dataRoot, false) {}
-  public Shelf(string dataRoot, bool silentStart) {
+  public Shelf(string dataRoot, bool silentStart) : this(dataRoot,silentStart,true) {}
+  internal Shelf(string dataRoot, bool silentStart, bool showTray) {
    root = dataRoot; startHidden = silentStart; ShowInTaskbar = !silentStart;
    Directory.CreateDirectory(root); LoadItems(); LoadPreferences(); preferences.StartWithWindows = StartupRegistration.IsEnabled();
-   Text = "拾放 ShelfDock 1.21"; Size = new Size(370, 590); MinimumSize = new Size(320, 350); StartPosition = FormStartPosition.Manual;
+   Text = "拾放 ShelfDock 1.23"; Size = new Size(370, 590); MinimumSize = new Size(320, 350); StartPosition = FormStartPosition.Manual;
    var area = Screen.PrimaryScreen.WorkingArea; Location = new Point(preferences.EdgeSide == "left" ? area.Left + 16 : area.Right - Width - 16, area.Top + Math.Max(10, (area.Height - Height)/2));
    Font = new Font("Microsoft YaHei UI", 9F); BackColor = bg; ForeColor = ink; TopMost = true; AllowDrop = true; KeyPreview = true;
    KeyDown += (s,e) => { if (e.Control && e.KeyCode == Keys.V) { Paste(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.A) { foreach (var en in entries) selected.Add(en); PaintSelection(); e.Handled = true; } if (e.Control && e.KeyCode == Keys.C && selected.Count > 0) { try { Clipboard.SetDataObject(MakeSelectionData(selected.ToArray()),true); } catch (Exception ex) { MessageBox.Show(ex.Message,"拾放"); } e.Handled = true; } if (e.KeyCode == Keys.Delete) { RemoveEntries(selected.ToArray()); e.Handled = true; } if (e.KeyCode == Keys.Escape) Hide(); };
@@ -102,15 +97,42 @@ namespace ShelfDock {
    Controls.Add(list); Controls.Add(footer); Controls.Add(header);
    DragEnter += EnterDrop; DragDrop += Drop; list.DragEnter += EnterDrop; list.DragDrop += Drop; empty.DragEnter += EnterDrop; empty.DragDrop += Drop;
    Resize += (s,e) => RefreshItems();
-   try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch {} tray.Text = "拾放 ShelfDock"; tray.Icon = Icon; tray.Visible = true;
-   var menu = new ContextMenuStrip(); menu.Items.Add("显示拾放   Ctrl+Alt+Space", null, (s,e) => ShowShelf()); menu.Items.Add("设置", null, (s,e) => { ShowShelf(); ShowSettings(); }); menu.Items.Add("使用帮助", null, (s,e) => MessageBox.Show("拖入内容暂存，再拖出到目标应用。\n文件只记录原位置，拖出采用复制，不移动原文件。\nCtrl+单击多选；Ctrl+A 全选；Ctrl+C 复制；Delete 移除。\n双击项目复制到剪贴板。关闭窗口行为可在设置中切换。\n同一次加入的多个文件会组成合集，可整体复制或拖出。成功拖出后仅移除对应暂存项目。\n在设置中可开关边缘唤出并选择屏幕左侧或右侧。\n文字与图片存储在本机，程序不联网。\n\n独立开发的 Windows 暂存工具，与 Yoink 无关联。", "拾放 · 使用帮助")); menu.Items.Add("退出", null, (s,e) => { quitting = true; Close(); }); tray.ContextMenuStrip = menu; tray.DoubleClick += (s,e) => ShowShelf();
-   edge.Interval = 50; edge.Tick += (s,e) => { if (Program.ExitEvent != null && Program.ExitEvent.WaitOne(0)) { quitting = true; Close(); return; } if (Program.ShowEvent != null && Program.ShowEvent.WaitOne(0)) ShowShelf(); bool held = (Control.MouseButtons & MouseButtons.Left) != 0; UpdateEdgeVisibility(held, Cursor.Position); SyncEdgeDropZones(held); }; edge.Start();
+   try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch {} tray.Text = "拾放 ShelfDock"; tray.Icon = Icon; tray.Visible = showTray;
+   var menu = new ContextMenuStrip(); menu.Items.Add("显示拾放   Ctrl+Alt+Space",null,(s,e)=>QueueTrayAction(ShowShelf)); menu.Items.Add("设置",null,(s,e)=>QueueTrayAction(ShowSettings)); menu.Items.Add("使用帮助",null,(s,e)=>QueueTrayAction(ShowHelp)); menu.Items.Add("退出",null,(s,e)=>QueueTrayAction(Quit)); tray.ContextMenuStrip=menu; tray.DoubleClick+=(s,e)=>QueueTrayAction(ShowShelf);
+   menu.Opening += (s,e) => { trayMenuOpen=true; blockEdgeUntilRelease=true; HideEdgeDropZones(); };
+   menu.Closed += (s,e) => { trayMenuOpen=false; };
+   edge.Interval = 50; edge.Tick += (s,e) => { bool held = (Control.MouseButtons & MouseButtons.Left) != 0; if(!held) blockEdgeUntilRelease=false; if(!EdgeInteractionAllowed) { HideEdgeDropZones(); return; } UpdateEdgeVisibility(held, Cursor.Position); SyncEdgeDropZones(held); }; edge.Start();
    emptyCloseTimer.Interval = 50; emptyCloseTimer.Tick += (s,e) => CheckEmptyShelfClose();
    animation.Interval = 15; animation.Tick += (s,e) => AdvanceAnimation();
-   HandleCreated += (s,e) => { if (!RegisterHotKey(Handle, 1, 2 | 4, (uint)Keys.Space) && !startHidden) tray.ShowBalloonTip(3000, "拾放", "快捷键 Ctrl+Alt+Space 已被其他程序占用。", ToolTipIcon.Info); };
-   HandleDestroyed += (s,e) => UnregisterHotKey(Handle,1);
+   HandleCreated += (s,e) => { hotkeyWindow=Handle; if (!RegisterHotKey(hotkeyWindow, 1, 2 | 4, (uint)Keys.Space) && !startHidden) tray.ShowBalloonTip(3000, "拾放", "快捷键 Ctrl+Alt+Space 已被其他程序占用。", ToolTipIcon.Info); };
+   HandleDestroyed += (s,e) => { if(hotkeyWindow!=IntPtr.Zero) UnregisterHotKey(hotkeyWindow,1); hotkeyWindow=IntPtr.Zero; };
    FormClosing += (s,e) => { if (!quitting && e.CloseReason == CloseReason.UserClosing && preferences.CloseToTray) { e.Cancel = true; Hide(); } else { quitting = true; Save(); edge.Stop(); animation.Stop(); tray.Visible = false; tray.Dispose(); } };
    RefreshItems();
+  }
+  internal void InitializeVisibility() { if(!initialVisibilityHandled) { initialVisibilityHandled=true; var handle=Handle; } }
+  internal void Quit() { quitting=true; Close(); }
+  internal ContextMenuStrip TrayMenu { get { return tray.ContextMenuStrip; } }
+  internal void ShowSettings() {
+   if(dialogDepth>0) { ActivateDialog(); return; }
+   ShowShelf(); if(animation.Enabled) FinishAnimation(); HideEdgeDropZones(); dialogDepth++;
+   try { ShowSettingsDialog(); } finally { dialogDepth--; blockEdgeUntilRelease=true; }
+  }
+  void ActivateDialog() { foreach(var dialog in OwnedForms) if(dialog.Visible) { dialog.Activate(); return; } }
+  internal void ShowHelp() {
+   if(dialogDepth>0) { ActivateDialog(); return; }
+   ShowShelf(); if(animation.Enabled) FinishAnimation(); HideEdgeDropZones(); dialogDepth++;
+   try { using(var dialog=new Form { Text="拾放 · 使用帮助",StartPosition=FormStartPosition.CenterParent,FormBorderStyle=FormBorderStyle.FixedDialog,MaximizeBox=false,MinimizeBox=false,ShowInTaskbar=false,ClientSize=new Size(440,350),Font=Font }) {
+    var help=new TextBox { Multiline=true,ReadOnly=true,BorderStyle=BorderStyle.None,BackColor=dialog.BackColor,ScrollBars=ScrollBars.Vertical,Location=new Point(20,20),Size=new Size(400,270),Text="拖入文件、文字或图片暂存，再拖到目标应用。\r\n\r\n同一次加入多个文件会组成虚拟合集，不创建真实文件夹。成功拖出只移除对应暂存项，原文件保持原位。\r\n\r\nCtrl+单击多选；Ctrl+A 全选；Ctrl+C 复制；Delete 移除。双击项目复制到剪贴板。\r\nCtrl+Alt+Space 显示或收起窗口。\r\n\r\n设置支持边缘方向、比例范围、关闭延迟、开机静默启动及关闭到托盘。\r\n安装版与便携版共用一个托盘图标，重复启动会显示已运行的窗口。\r\n\r\n文字与图片存储在本机，程序不联网。\r\n独立开发的 Windows 暂存工具，与 Yoink 无关联。" };
+    var ok=new Button { Text="确定",DialogResult=DialogResult.OK,Location=new Point(345,307),Size=new Size(75,28) };
+    dialog.Controls.Add(help); dialog.Controls.Add(ok); dialog.AcceptButton=ok; dialog.CancelButton=ok; dialog.ShowDialog(this);
+   } } finally { dialogDepth--; blockEdgeUntilRelease=true; }
+  }
+  bool EdgeInteractionAllowed { get { return !trayMenuOpen && !trayActionPending && !blockEdgeUntilRelease && dialogDepth==0 && !quitting; } }
+  void HideEdgeDropZones() { foreach(var zone in edgeDropZones) zone.Hide(); }
+  void QueueTrayAction(Action action) {
+   if(IsDisposed || quitting) return;
+   InitializeVisibility(); trayActionPending=true; blockEdgeUntilRelease=true; HideEdgeDropZones();
+   BeginInvoke((Action)(()=> { try { if(!IsDisposed && !quitting) action(); } finally { trayActionPending=false; } }));
   }
   protected override void WndProc(ref Message m) { if (m.Msg == 0x0312 && m.WParam.ToInt32() == 1) { if (Visible) Hide(); else ShowShelf(); } base.WndProc(ref m); }
   internal static bool AtEdge(Point p, Rectangle screen, string side, int percent) { int width = Math.Max(1, (int)Math.Ceiling(screen.Width * percent / 100.0)); return screen.Contains(p) && (side == "left" ? p.X < screen.Left+width : p.X >= screen.Right-width); }
@@ -119,18 +141,18 @@ namespace ShelfDock {
    UpdateEdgeVisibility(leftHeld,pointer,false);
   }
   internal bool HandleEdgeDrag(IDataObject data, DragDropEffects allowed, Point pointer) {
-   if (ownDrag || !CanAccept(data) || (allowed & DragDropEffects.Copy) == 0) return false;
+   if (!EdgeInteractionAllowed || ownDrag || !CanAccept(data) || (allowed & DragDropEffects.Copy) == 0) return false;
    UpdateEdgeVisibility(true,pointer,true);
    return Visible;
   }
   void SyncEdgeDropZones(bool candidate) {
-   if (!candidate || ownDrag || !preferences.EdgeEnabled || (Visible && Opacity >= 0.1)) { foreach (var zone in edgeDropZones) zone.Hide(); return; }
+   if (!EdgeInteractionAllowed || !candidate || ownDrag || !preferences.EdgeEnabled || (Visible && Opacity >= 0.1)) { HideEdgeDropZones(); return; }
    var screens = Screen.AllScreens;
    while (edgeDropZones.Count < screens.Length) edgeDropZones.Add(new EdgeDropZone(this));
    for (int i = 0; i < edgeDropZones.Count; i++) {
     var zone = edgeDropZones[i]; if (i >= screens.Length) { zone.Hide(); continue; }
     var area = screens[i].Bounds; int width = Math.Max(1,(int)Math.Ceiling(area.Width*preferences.EdgePercent/100.0));
-    zone.Bounds = new Rectangle(preferences.EdgeSide == "left" ? area.Left : area.Right-width,area.Top,width,area.Height);
+    zone.Bounds = Rectangle.Intersect(new Rectangle(preferences.EdgeSide == "left" ? area.Left : area.Right-width,area.Top,width,area.Height),screens[i].WorkingArea);
     if (!zone.Visible) zone.Show();
    }
   }
@@ -160,8 +182,8 @@ namespace ShelfDock {
   static void DrawPin(Graphics g, Rectangle bounds, bool active) { var state = g.Save(); g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; g.TranslateTransform(bounds.Width/2F,bounds.Height/2F); var color = active ? Color.FromArgb(0,122,111) : Color.FromArgb(107,120,126); using (var pen = new Pen(color,1.5F)) { pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round; pen.StartCap = pen.EndCap = System.Drawing.Drawing2D.LineCap.Round; g.DrawLine(pen,-4,-7,4,-7); g.DrawLine(pen,-3,-7,-3,-1); g.DrawLine(pen,3,-7,3,-1); g.DrawLine(pen,-3,-1,-5,2); g.DrawLine(pen,3,-1,5,2); g.DrawLine(pen,-5,2,5,2); g.DrawLine(pen,0,2,0,7); } g.Restore(state); }
   internal void SavePreferences() { try { var path = Path.Combine(root,"settings.json"); var temp = path + ".tmp"; using (var fs = File.Create(temp)) new DataContractJsonSerializer(typeof(Preferences)).WriteObject(fs,preferences); if (File.Exists(path)) File.Replace(temp,path,null); else File.Move(temp,path); } catch (Exception ex) { MessageBox.Show("无法保存设置：" + ex.Message,"拾放"); } }
   void LoadPreferences() { var path = Path.Combine(root,"settings.json"); if (!File.Exists(path)) return; try { using (var fs = File.OpenRead(path)) { var saved = (Preferences)new DataContractJsonSerializer(typeof(Preferences)).ReadObject(fs); if (saved != null) preferences = saved; } if (preferences.EdgeSide != "left" && preferences.EdgeSide != "right") preferences.EdgeSide = "right"; if (preferences.EdgePercent < 5 || preferences.EdgePercent > 50 || preferences.EdgePercent % 5 != 0) preferences.EdgePercent = 10; if (preferences.EmptyCloseDelayHalfSeconds < 0 || preferences.EmptyCloseDelayHalfSeconds > 4) preferences.EmptyCloseDelayHalfSeconds = 1; } catch { preferences = new Preferences(); } }
-  internal void ShowSettings() { edgePreview = false; CancelEmptyShelfClose(); BeginFade(true); using (var dialog = new Form { Text = "拾放设置", StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false, ClientSize = new Size(370,378), Font = Font, ShowInTaskbar = false }) { var enabled = new CheckBox { Text = "拖拽到屏幕边缘时显示拾放", AutoSize = true, Location = new Point(22,22), Checked = preferences.EdgeEnabled }; var label = new Label { Text = "屏幕边缘", AutoSize = true, Location = new Point(22,65) }; var left = new RadioButton { Text = "左侧", AutoSize = true, Location = new Point(100,63), Checked = preferences.EdgeSide == "left" }; var right = new RadioButton { Text = "右侧", AutoSize = true, Location = new Point(180,63), Checked = preferences.EdgeSide != "left" }; var widthLabel = new Label { Text = "边缘范围", AutoSize = true, Location = new Point(22,105) }; var width = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(100,101), Width = 85 }; for (int n = 5; n <= 50; n += 5) width.Items.Add(n + "%"); width.SelectedIndex = preferences.EdgePercent / 5 - 1; var unit = new Label { Text = "屏幕宽度", AutoSize = true, Location = new Point(194,105) }; var emptyDelayLabel = new Label { Text = "最后一项移除后关闭", AutoSize = true, Location = new Point(22,148) }; var emptyDelay = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(220,144), Width = 110 }; emptyDelay.Items.Add("立即关闭"); for (int n = 1; n <= 4; n++) emptyDelay.Items.Add((n * 0.5).ToString("0.0") + " 秒"); emptyDelay.SelectedIndex = preferences.EmptyCloseDelayHalfSeconds; var closeLabel = new Label { Text = "关闭窗口时", AutoSize = true, Location = new Point(22,190) }; var closeMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(130,186), Width = 175 }; closeMode.Items.Add("直接退出程序"); closeMode.Items.Add("收起到托盘"); closeMode.SelectedIndex = preferences.CloseToTray ? 1 : 0; preferences.StartWithWindows = StartupRegistration.IsEnabled(); var startup = new CheckBox { Text = "开机时静默启动到托盘", AutoSize = true, Location = new Point(22,233), Checked = preferences.StartWithWindows }; var note = new Label { Text = "便携版请保持程序文件位置不变。", AutoSize = true, Location = new Point(42,258), ForeColor = muted }; Action update = () => { left.Enabled = enabled.Checked; right.Enabled = enabled.Checked; width.Enabled = enabled.Checked; }; enabled.CheckedChanged += (s,e) => update(); update(); var ok = new Button { Text = "保存", Location = new Point(192,313), Size = new Size(75,30), DialogResult = DialogResult.OK }; var cancel = new Button { Text = "取消", Location = new Point(274,313), Size = new Size(75,30), DialogResult = DialogResult.Cancel }; dialog.Controls.AddRange(new Control[] { enabled,label,left,right,widthLabel,width,unit,emptyDelayLabel,emptyDelay,closeLabel,closeMode,startup,note,ok,cancel }); dialog.AcceptButton = ok; dialog.CancelButton = cancel; if (dialog.ShowDialog(this) == DialogResult.OK) { try { StartupRegistration.Set(startup.Checked, Application.ExecutablePath); preferences.StartWithWindows = startup.Checked; } catch (Exception ex) { MessageBox.Show("无法更改开机启动设置：" + ex.Message, "拾放", MessageBoxButtons.OK, MessageBoxIcon.Error); return; } preferences.EdgeEnabled = enabled.Checked; preferences.EdgeSide = left.Checked ? "left" : "right"; preferences.EdgePercent = (width.SelectedIndex + 1) * 5; preferences.EmptyCloseDelayHalfSeconds = emptyDelay.SelectedIndex; preferences.CloseToTray = closeMode.SelectedIndex == 1; SavePreferences(); } } }
-  internal void ShowShelf() { edgePreview = false; if (!Visible) { var area = Screen.FromPoint(Cursor.Position).WorkingArea; if (!Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(Bounds))) Location = new Point(preferences.EdgeSide == "left" ? area.Left+16 : area.Right-Width-16,area.Top+Math.Max(10,(area.Height-Height)/2)); } BeginFade(true); WindowState = FormWindowState.Normal; Activate(); }
+  void ShowSettingsDialog() { edgePreview = false; CancelEmptyShelfClose(); BeginFade(true); using (var dialog = new Form { Text = "拾放设置", StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false, ClientSize = new Size(370,378), Font = Font, ShowInTaskbar = false }) { var enabled = new CheckBox { Text = "拖拽到屏幕边缘时显示拾放", AutoSize = true, Location = new Point(22,22), Checked = preferences.EdgeEnabled }; var label = new Label { Text = "屏幕边缘", AutoSize = true, Location = new Point(22,65) }; var left = new RadioButton { Text = "左侧", AutoSize = true, Location = new Point(100,63), Checked = preferences.EdgeSide == "left" }; var right = new RadioButton { Text = "右侧", AutoSize = true, Location = new Point(180,63), Checked = preferences.EdgeSide != "left" }; var widthLabel = new Label { Text = "边缘范围", AutoSize = true, Location = new Point(22,105) }; var width = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(100,101), Width = 85 }; for (int n = 5; n <= 50; n += 5) width.Items.Add(n + "%"); width.SelectedIndex = preferences.EdgePercent / 5 - 1; var unit = new Label { Text = "屏幕宽度", AutoSize = true, Location = new Point(194,105) }; var emptyDelayLabel = new Label { Text = "最后一项移除后关闭", AutoSize = true, Location = new Point(22,148) }; var emptyDelay = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(220,144), Width = 110 }; emptyDelay.Items.Add("立即关闭"); for (int n = 1; n <= 4; n++) emptyDelay.Items.Add((n * 0.5).ToString("0.0") + " 秒"); emptyDelay.SelectedIndex = preferences.EmptyCloseDelayHalfSeconds; var closeLabel = new Label { Text = "关闭窗口时", AutoSize = true, Location = new Point(22,190) }; var closeMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(130,186), Width = 175 }; closeMode.Items.Add("直接退出程序"); closeMode.Items.Add("收起到托盘"); closeMode.SelectedIndex = preferences.CloseToTray ? 1 : 0; preferences.StartWithWindows = StartupRegistration.IsEnabled(); var startup = new CheckBox { Text = "开机时静默启动到托盘", AutoSize = true, Location = new Point(22,233), Checked = preferences.StartWithWindows }; var note = new Label { Text = "便携版请保持程序文件位置不变。", AutoSize = true, Location = new Point(42,258), ForeColor = muted }; Action update = () => { left.Enabled = enabled.Checked; right.Enabled = enabled.Checked; width.Enabled = enabled.Checked; }; enabled.CheckedChanged += (s,e) => update(); update(); var ok = new Button { Text = "保存", Location = new Point(192,313), Size = new Size(75,30), DialogResult = DialogResult.OK }; var cancel = new Button { Text = "取消", Location = new Point(274,313), Size = new Size(75,30), DialogResult = DialogResult.Cancel }; dialog.Controls.AddRange(new Control[] { enabled,label,left,right,widthLabel,width,unit,emptyDelayLabel,emptyDelay,closeLabel,closeMode,startup,note,ok,cancel }); dialog.AcceptButton = ok; dialog.CancelButton = cancel; if (dialog.ShowDialog(this) == DialogResult.OK) { try { StartupRegistration.Set(startup.Checked, Application.ExecutablePath); preferences.StartWithWindows = startup.Checked; } catch (Exception ex) { MessageBox.Show("无法更改开机启动设置：" + ex.Message, "拾放", MessageBoxButtons.OK, MessageBoxIcon.Error); return; } preferences.EdgeEnabled = enabled.Checked; preferences.EdgeSide = left.Checked ? "left" : "right"; preferences.EdgePercent = (width.SelectedIndex + 1) * 5; preferences.EmptyCloseDelayHalfSeconds = emptyDelay.SelectedIndex; preferences.CloseToTray = closeMode.SelectedIndex == 1; SavePreferences(); } } }
+  internal void ShowShelf() { InitializeVisibility(); edgePreview = false; HideEdgeDropZones(); if (!Visible) { var area = Screen.FromPoint(Cursor.Position).WorkingArea; if (!Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(Bounds))) Location = new Point(preferences.EdgeSide == "left" ? area.Left+16 : area.Right-Width-16,area.Top+Math.Max(10,(area.Height-Height)/2)); } BeginFade(true); WindowState = FormWindowState.Normal; Activate(); }
   public new void Hide() { edgePreview = false; CancelEmptyShelfClose(); BeginFade(false); }
   protected override void SetVisibleCore(bool value) { if (value && startHidden && !initialVisibilityHandled) { initialVisibilityHandled = true; var handle = Handle; base.SetVisibleCore(false); return; } if (value) initialVisibilityHandled = true; base.SetVisibleCore(value); }
   readonly System.Diagnostics.Stopwatch animationClock = new System.Diagnostics.Stopwatch();
@@ -246,3 +268,4 @@ namespace ShelfDock {
   void Save() { try { var path = Path.Combine(root,"items.json"); var temp = path + ".tmp"; using (var fs = File.Create(temp)) new DataContractJsonSerializer(typeof(List<Entry>)).WriteObject(fs, entries); if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp,path); } catch (Exception ex) { MessageBox.Show("无法保存暂存列表：" + ex.Message, "拾放"); } }
  }
 }
+
